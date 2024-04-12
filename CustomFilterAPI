@@ -1,0 +1,166 @@
+//Code for Adding custom API filter
+
+public static class WebApiConfig
+{
+        public static void Register(HttpConfiguration config)
+        {
+            // Web API routes
+            config.MapHttpAttributeRoutes();
+
+            config.Routes.MapHttpRoute(
+                name: "DefaultApi",
+                routeTemplate: "api/WebApi/{controller}/{action}/{id}",
+                defaults: new { id = RouteParameter.Optional }
+            );
+            
+            // Add custom API filter
+            config.Filters.Add(new ApiAuthorizationAttribute());
+            // Change API return data into JSON formate
+            config.Formatters.JsonFormatter.SupportedMediaTypes.Add(new System.Net.Http.Headers.MediaTypeHeaderValue("text/html"));
+        }
+ }
+ 
+//Code for creating access token for user
+
+[HttpPost]
+public IHttpActionResult AddUserApiAccess(List<UserAccessModel> uaModel) {
+	var info = new { Status = string.Empty, Message = string.Empty, id = string.Empty, Key = "" };
+	var user = uaModel.FirstOrDefault();
+
+	try {
+		string TokenInfo = _apiAccessTokenAccessor.SaveResetToken(user.UserId, user.ExpDate, user.IsLifeTime.Value);
+		int ApiUserTokenId = Convert.ToInt32(TokenInfo.Split('|')[0]);
+		string TokenKey = TokenInfo.Split('|')[1];
+		string msg = _apiUserAccessAccessor.SaveUpdateAccessApi(ApiUserTokenId, uaModel);
+		info = new { Status = "", Message = "Success", id = user.UserId, Key = TokenKey };
+	} catch (Exception ex) {
+		info = new { Status = "", Message = ex.ToString(), id = user.UserId, Key = "" };
+	}
+ return Ok(info);
+}
+
+//Code for allowing users to access APIs
+public string SaveUpdateAccessApi(int ApiUserTokenId, List<UserAccessModel> uaModel)
+{
+            string MSG = "";
+            try
+            {
+                List<ApiUserAccess> auList = new List<ApiUserAccess>();
+                foreach (var itm in uaModel)
+                {
+                    if(itm.IsApi==true)
+                    {
+                        ApiUserAccess au = new ApiUserAccess();
+                        au.ApiMasterId = itm.ApiMasterId;
+                        au.ApiUserAccessTokenId = ApiUserTokenId;
+                        au.IsApi = itm.IsApi;
+                        auList.Add(au);
+                    }
+                }
+                if (_db.ApiUserAccesses.Any(x => x.ApiUserAccessTokenId == ApiUserTokenId))
+                {
+                    var dt = _db.ApiUserAccesses.Where(x => x.ApiUserAccessTokenId == ApiUserTokenId).ToList();
+                    _db.ApiUserAccesses.RemoveRange(dt);
+                    _db.SaveChanges();
+                }
+
+                _db.ApiUserAccesses.AddRange(auList);
+                _db.SaveChanges();
+                MSG = "Success";
+            }
+            catch (Exception ex)
+            {
+                MSG = ex.ToString();
+            }
+            return MSG;
+   }
+
+//Code for validating access token for allowed API controller & methods
+public UserClaimIdentityViewModel CheckAccessApi(string reqToken, string controllerName, string actionName)
+{
+            UserClaimIdentityViewModel cl = new UserClaimIdentityViewModel();
+            bool checkStatus = false;
+            var cdt = DateTime.Now.Date;
+            var tkData = _db.ApiUserAccessTokens.Where(x => x.AccessToken == reqToken && (x.IsLifeTime == true || x.ExpDate >= cdt)).FirstOrDefault();
+            if (tkData != null)
+            {
+                cl.UserId = tkData.UserId;
+
+                var dt=(from t1 in _db.ApiUserAccesses
+                 join t2 in _db.ApiMasters on t1.ApiMasterId equals t2.Id
+                 where t1.ApiUserAccessTokenId == tkData.Id &&
+                 t1.IsApi == true &&
+                 t2.ApiControllerName == controllerName &&
+                 t2.ApiActionName == actionName
+                 select new { t1.Id }).ToList();
+                if (dt != null && dt.Count > 0)
+                {
+                    checkStatus = true;
+                }
+                else
+                {
+                    checkStatus = false;
+                }
+            }
+            else
+            {
+                checkStatus = false;
+            }
+            cl.Status = checkStatus;
+            return cl;
+ }
+
+public bool checkAccess(string reqToken, string controllerName, string actionName)
+{
+            ApiUserAccessAccessor _userAccessAccesor = new ApiUserAccessAccessor();
+            var clData = new UserClaimIdentityViewModel();
+            bool checkStatus = false;
+            clData = _userAccessAccesor.CheckAccessApi(reqToken, controllerName, actionName);
+            if(clData.Status==true)
+            IdentitySignIn(clData.UserId);
+            checkStatus = clData.Status;
+            return checkStatus;
+}
+
+public override void OnActionExecuting(HttpActionContext filterContext)
+{
+            string actionName = filterContext.ActionDescriptor.ActionName;
+            string controllerName = filterContext.ActionDescriptor.ControllerDescriptor.ControllerName;
+            var reqToken = filterContext.Request.Headers.Authorization;
+            var principal = filterContext.RequestContext.Principal as ClaimsPrincipal;
+            
+            if(controllerName== "Api" || controllerName == "ApiCloud") {
+                // No checking for this apis.
+            }
+            else
+            {
+                bool checkStatus = false;
+                if (!principal.Identity.IsAuthenticated)
+                {
+                    if (reqToken != null)
+                    {
+                        checkStatus = checkAccess(reqToken.ToString(), controllerName, actionName);
+                    }
+                    if (!checkStatus)
+                    {
+                        var response = filterContext.Request.CreateErrorResponse(HttpStatusCode.NotFound, "Invalid Token.");
+                        filterContext.Response = response;
+                    }
+                }
+                else
+                {
+                    var clData = principal.Claims.Select(x => x.Value).ToList();
+                    if (clData.Count <= 2) {
+                        if (reqToken != null) {
+                            checkStatus = checkAccess(reqToken.ToString(), controllerName, actionName);
+                        }
+                        if (!checkStatus) {
+                            var response = filterContext.Request.CreateErrorResponse(HttpStatusCode.NotFound, "Invalid Token.");
+                            filterContext.Response = response;
+                        }
+                    }
+                }
+            }
+
+            base.OnActionExecuting(filterContext);
+}
